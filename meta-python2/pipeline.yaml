@@ -1,0 +1,20 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: meta-python2-build-pipeline
+  namespace: tekton-pipelines
+spec:
+  tasks:
+  - name: meta-python2-setup-workspace
+    taskRef:
+      name: meta-python2-setup-workspace
+  - name: meta-python2-build
+    runAfter:
+     - meta-python2-setup-workspace
+    taskRef:
+      name: meta-python2-build
+  - name: meta-python2-log
+    runAfter:
+      - meta-python2-build
+    taskRef:
+      name: meta-python2-log

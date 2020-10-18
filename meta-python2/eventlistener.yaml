@@ -1,0 +1,13 @@
+---
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: EventListener
+metadata:
+  name: meta-python2-listener
+  namespace: tekton-pipelines
+spec:
+  serviceAccountName: tekton-triggers-sa
+  serviceType: NodePort
+  triggers:
+    - name: meta-python2-build
+      template:
+        name: meta-python2-build-template

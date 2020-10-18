@@ -1,0 +1,26 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: meta-python2-build
+  namespace: tekton-pipelines
+spec:
+  steps:
+    - name: run-build
+      image: registry.hub.docker.com/threexc/yocto-builder
+      workingDir: /workspace/poky
+      script: |
+        #!/bin/bash -xe
+        source oe-init-build-env build
+        export LANG=en_US.UTF-8
+        # get the latest python recipes and bitbake them
+        COMMIT_LOG=$(cd ../../meta-python2/ && git log --pretty=oneline --grep="python" origin/master..origin/master-next)
+        BUILD_RECIPES=$(echo "${COMMIT_LOG}" | awk '{print $2}' | tr -d : | grep "python")
+        UNBUILT_LOG=$(cd ../../meta-python2 && git log --pretty=oneline --grep="python" --format="%h: %s" origin/master..origin/master-next | grep -v -E '[[:alnum:]]+: python3')
+        bitbake ${BUILD_RECIPES}
+        echo "The following patches were not addressed: "
+        echo "${UNBUILT_LOG}"
+      volumeMounts:
+      - name: build
+        mountPath: /workspace
+
