@@ -1,0 +1,61 @@
+Debian Buster
+
+When we run testimage we want the fastest possible turnaround on the test results, right?
+So don't use SLIRP, nographic and don't run without kvm, right? (Caveat: assuming host is same arch as target)
+
+Everywhere you look on the Interwebs, you will find everyone telling you to run the container privileged. No. Just no.
+Don't run privileged, don't disable SELinux. Don't add attack surfaces to your host. Be smarter, not lazier.
+
+Instead we want to set up specific security policies for the specific needs of the use case. Not every container we run will need to be able
+to run qemu accelerated, right? Only the one which is actually running testimage.
+
+https://kubernetes.io/docs/concepts/policy/pod-security-policy/#users-and-groups
+
+$ docker run --group-add 109 --group-add 106 --group-add video --rm -it -v /dev/net/tun:/dev/net/tun -v /dev/kvm:/dev/kvm -v /dev/dri:/dev/dri threexc/yocto-builder id
+uid=1000(builder) gid=100(users) groups=100(users),39(video),106,109
+
+
+When we run testimage, there are several things that will speed up the execution on the host.
+KVM
+Graphics acceleration
+TUN/TAP device
+
+When running qemu inside a container, we need to do two things to make those speed-ups available:
+bind mount the device
+add the group to the user inside the container
+
+On Debian Buster, the devices we want are (this is with an NVidia GPU):
+/dev/kvm
+/dev/net/tun
+/dev/fb0
+/dev/dri/card0
+and possibly
+/dev/dri/renderD128
+
+NOTE: all of these require host and distro specific configuration
+
+What group owns those devices?
+
+crw-rw----+  1 root       kvm      10, 232 Oct 17 15:19 kvm
+crw-rw----   1 root       netdev   10, 200 Oct 17 15:19 tun
+crw-rw----   1 root       video    29,   0 Oct 17 15:19 fb0
+crw-rw----+  1 root       video    226,   0 Oct 17 15:19 card0
+crw-rw----+  1 root       render   226, 128 Oct 17 15:19 renderD128
+
+Inside the docker container, the named group might not exist. The numeric value of a group (and the presence of a named group) varies widely by Linux distribution.
+This does not matter, we will use the numeric group. What we are after here is privileges (probably including write) of the device (the path we are bind mounting into
+the container). 
+
+NOTE: the reality of variations in group numeric value and named groups means this will have to a be configurable parameters for any host running yocto-tekton.
+
+video:x:44:
+kvm:x:106:
+render:x:107:
+netdev:x:109:
+uml-net:x:131:
+
+One of the ways to have a persistent tap device on Debian Buster is to use uml-utilities and the uml-net group
+
+It appears for k8s, the way to set additional container groups is with SupplementalGroups:
+https://kubernetes.io/docs/concepts/policy/pod-security-policy/#users-and-groups
+
