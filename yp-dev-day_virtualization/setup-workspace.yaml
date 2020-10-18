@@ -1,0 +1,46 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: yp-dev-day-virtualization-setup-workspace
+  namespace: tekton-pipelines
+spec:
+  steps:
+    - name: clear-old-workspace
+      image: registry.hub.docker.com/kasproject/kas
+      workingDir: /workspace/yp-dev-day_virtualization
+      script: |
+        #!/bin/bash -xe
+        if [ -d build/tmp ]; then
+            rm -rf build/tmp
+        fi
+      volumeMounts:
+      - name: build
+        mountPath: /workspace
+    - name: create-workspace
+      image: registry.hub.docker.com/kasproject/kas
+      workingDir: /workspace
+      script: |
+        #!/bin/bash -xe
+        if [ -d yp-dev-day_virtualization ]; then
+            (cd yp-dev-day_virtualization && git checkout main)
+        else
+           git clone https://gitlab.com/moto-timo/yp-dev-day_virtualization.git
+        fi
+      volumeMounts:
+      - name: build
+        mountPath: /workspace
+
+    - name: update-workspace
+      image: registry.hub.docker.com/kasproject/kas
+      workingDir: /workspace
+      script: |
+        #!/bin/bash -xe
+        (cd yp-dev-day_virtualization && git checkout main && git pull --rebase)
+      volumeMounts:
+      - name: build
+        mountPath: /workspace
+      volumeMounts:
+      - name: build
+        mountPath: /workspace
+

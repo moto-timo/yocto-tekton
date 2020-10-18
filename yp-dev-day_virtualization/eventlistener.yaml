@@ -1,0 +1,13 @@
+---
+apiVersion: triggers.tekton.dev/v1alpha1
+kind: EventListener
+metadata:
+  name: yp-dev-day-virtualization-listener
+  namespace: tekton-pipelines
+spec:
+  serviceAccountName: tekton-triggers-sa
+  serviceType: NodePort
+  triggers:
+    - name: yp-dev-day-virtualization-build
+      template:
+        name: yp-dev-day-virtualization-build-template

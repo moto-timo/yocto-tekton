@@ -1,0 +1,35 @@
+---
+apiVersion: tekton.dev/v1beta1
+kind: Task
+metadata:
+  name: yp-dev-day-virtualization-build
+  namespace: tekton-pipelines
+spec:
+  steps:
+    - name: xen-raspberry-pi4-run-build
+      image: registry.hub.docker.com/kasproject/kas
+      workingDir: /workspace/yp-dev-day_virtualization
+      script: |
+        #!/bin/bash -xe
+        kas build kas/kas-xen-raspberry-pi4.yml
+      volumeMounts:
+      - name: build
+        mountPath: /workspace
+    - name: intel-kvm-ubuntu-run-build
+      image: registry.hub.docker.com/kasproject/kas
+      workingDir: /workspace/yp-dev-day_virtualization
+      script: |
+        #!/bin/bash -xe
+        kas build kas/kas-intel-kvm-ubuntu.yml
+      volumeMounts:
+      - name: build
+        mountPath: /workspace
+    - name: intel-acrn-run-build
+      image: registry.hub.docker.com/kasproject/kas
+      workingDir: /workspace/yp-dev-day_virtualization
+      script: |
+        #!/bin/bash -xe
+        kas build kas/kas-intel-acrn.yml
+      volumeMounts:
+      - name: build
+        mountPath: /workspace

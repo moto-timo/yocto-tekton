@@ -1,0 +1,20 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: yp-dev-day-virtualization-build-pipeline
+  namespace: tekton-pipelines
+spec:
+  tasks:
+  - name: yp-dev-day-virtualization-setup-workspace
+    taskRef:
+      name: yp-dev-day-virtualization-setup-workspace
+  - name: yp-dev-day-virtualization-build
+    taskRef:
+      name: yp-dev-day-virtualization-build
+    runAfter:
+      - yp-dev-day-virtualization-setup-workspace
+  - name: yp-dev-day-virtualization-log
+    taskRef:
+      name: yp-dev-day-virtualization-log
+    runAfter:
+      - yp-dev-day-virtualization-build

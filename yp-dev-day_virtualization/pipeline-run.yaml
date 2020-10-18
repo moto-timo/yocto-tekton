@@ -1,0 +1,19 @@
+apiVersion: tekton.dev/v1alpha1
+kind: PipelineRun
+metadata:
+  creationTimestamp: null
+  generateName: yp-dev-day-virtualization-build-pipeline-run-
+  namespace: tekton-pipelines
+spec:
+  pipelineRef:
+    name: yp-dev-day-virtualization-build-pipeline
+  timeout: 5h0m0s
+  podTemplate:
+    volumes:
+    - name: build
+      hostPath:
+        path: /tekton/data
+    - name: log
+      hostPath:
+        path: /tekton/data/logs
+status: {}
