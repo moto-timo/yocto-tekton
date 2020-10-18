@@ -1,0 +1,48 @@
+Debian Buster
+
+netdev is a standard group on Debian
+https://wiki.debian.org/SystemGroups
+
+# Install /usr/bin/tunctl
+$ sudo apt update && sudo apt install uml-utilities
+
+# add your user to netdev group
+$ sudo usermod -aG $(id -u) netdev
+
+# create a persistent tap0 device with tunctl
+$ tunctl -t tap0 -g netdev
+
+Create persistent /dev/net/tun
+# /etc/udev/rules.d/99_net_tun.rules 
+
+KERNEL=="tun", GROUP="netdev", MODE="0660", OPTIONS+="static_node=net/tun"
+
+https://unix.stackexchange.com/questions/243382/making-dev-net-tun-available-to-qemu
+Create persistent tap device with ip
+$ sudo ip tuntap add dev tap0 mode tap group netdev
+$ ip tuntap list
+tap0: tap persist group 109
+
+Create tun device on startup with systemd-networkd
+# /etc/systemd/network/70-tun0.network
+
+[Match]
+Name=tun0
+
+[Tun]
+Group=netdev
+
+Create tap device on startup with systemd-networkd
+NOTE: this fails probably because of permissions on /dev/net/tun ?
+       or at least udev created /dev/net/tun and systemd-networkd are
+       not playing nice
+# /etc/systemd/network/90-tap0.netdev
+
+[NetDev]
+Name=tap0
+Kind=tap
+
+[Tap]
+Group=netdev
+MultiQueue=true
+PacketInfo=true
