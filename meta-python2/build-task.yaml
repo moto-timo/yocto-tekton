@@ -13,11 +13,8 @@ spec:
         #!/bin/bash -xe
         source oe-init-build-env build
         export LANG=en_US.UTF-8
-        # get the latest python recipes and bitbake them
-        COMMIT_LOG=$(cd ../../meta-python2/ && git log --pretty=oneline --grep="python" origin/master..origin/master-next)
-        BUILD_RECIPES=$(echo "${COMMIT_LOG}" | awk '{print $2}' | tr -d : | grep "python")
-        UNBUILT_LOG=$(cd ../../meta-python2 && git log --pretty=oneline --grep="python" --format="%h: %s" origin/master..origin/master-next | grep -v -E '[[:alnum:]]+: python3')
-        bitbake ${BUILD_RECIPES}
+        # get the latest python2 patches from patchwork and bitbake them
+        patchwork list -p oe -s New "[meta-python2"
         echo "The following patches were not addressed: "
         echo "${UNBUILT_LOG}"
       volumeMounts:

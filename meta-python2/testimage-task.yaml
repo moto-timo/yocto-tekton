@@ -5,28 +5,30 @@ metadata:
   name: meta-python2-testimage
   namespace: tekton-pipelines
 spec:
+  resources:
+      outputs:
+        - name: workspace
+          resourceref:
+            testimage-ptest-image
   steps:
     - name: build-testimage
       image: registry.hub.docker.com/threexc/yocto-builder
       args: 
-      workingDir: /workspace/poky
+      workingDir: /workspace/meta-python2
       script: |
         #!/bin/bash -xe
-        source oe-init-build-env build
-        export LANG=en_US.UTF-8
-        bitbake meta-python2-ptest-image
+        kas build kas/meta-python2-ptest-image.yml
       volumeMounts:
       - name: build
         mountPath: /workspace
     - name: run-testimage
       image: registry.hub.docker.com/threexc/yocto-builder
       args:
-      workingDir: /workspace/poky
+      workingDir: /workspace/meta-python2
       script: |
         #!/bin/bash -xe
-        source oe-init-build-env build
-        export LANG=en_US.UTF-8
-        bitbake -c testimage meta-python2-ptest-image
+        kas build -c testimage kas-meta-python2-ptest-image.yml
       volumeMounts:
       - name: build
         mountPath: /workspace
+
