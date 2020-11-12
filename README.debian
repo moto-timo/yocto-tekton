@@ -1,0 +1,439 @@
+Kubernetes with CRI-O (Debian 10 Buster)
+========================================
+
+Turn off swap
+-------------
+sudo swapoff -a
+
+In /etc/fstab, comment out the swap line
+
+Prevent system from sleeping or hibernating (optional)
+------------------------------------------------------
+sudo systemctl mask sleep.target hibernate.target
+
+Install ufw firewall
+--------------------
+sudo apt update && sudo apt install ufw
+sudo ufw enable
+
+Open the ports needed for Kubernetes
+------------------------------------
+sudo ufw allow 6443/tcp
+sudo ufw allow 2379:2380/tcp
+sudo ufw allow 10250/tcp
+sudo ufw allow 10251/tcp
+sudo ufw allow 10252/tcp
+sudo ufw route allow in on cni0 out on eth0
+sudo ufw route allow in on cni0 out on cni0
+
+Set up cri-o container runtime
+------------------------------
+
+Mostly following:
+https://kubernetes.io/docs/setup/production-environment/container-runtimes/#cri-o
+
+Set up overlay fs and bridge networking
+---------------------------------------
+
+sudo modprobe overlay
+sudo modprobe br_netfilter
+
+Load the kernel modules at startup
+----------------------------------
+
+cat <<EOF | sudo tee /etc/modules-load.d/crio.conf
+overlay
+br_netfilter
+EOF
+
+Set the necessary sysctl network settings and make them permanent
+---------------------------------------------------------
+cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-crio.conf
+net.bridge.bridge-nf-call-iptables  = 1
+net.ipv4.ip_forward                 = 1
+net.bridge.bridge-nf-call-ip6tables = 1
+EOF
+
+Load the settings
+-----------------
+sudo sysctl --system
+
+Add apt repos for cri-o v1.19
+-----------------------------
+If you have not already done so, enable https transport for apt
+sudo apt update && sudo apt install apt-transport-https
+
+cat <<EOF | sudo tee /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
+deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/Debian_10/ /
+EOF
+
+cat <<EOF | sudo tee /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:1.19.list
+deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/1.19/Debian_10/ /
+EOF
+
+Add signing keys for cri-o repos
+--------------------------------
+curl -L https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:1.19/Debian_10/Release.key | sudo apt-key --keyring /etc/apt/trusted.gpg.d/libcontainers.gpg add -
+
+curl -L https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/Debian_10/Release.key | sudo apt-key --keyring /etc/apt/trusted.gpg.d/libcontainers.gpg add -
+
+Add buster-backports apt repo
+-----------------------------
+If you have not already done so, add buster-backports apt repo
+
+Add the following lines to /etc/apt/sources.list
+# buster-backports
+deb http://debian.osuosl.org/debian/ buster-backports main
+deb-src http://debian.osuosl.org/debian/ buster-backports main
+
+Upgrade libseccomp2 to version from buster-backports
+----------------------------------------------------
+sudo apt update && sudo apt install -t buster-backports libseccomp2
+
+Install cri-o and cri-o-runc
+----------------------------
+sudo apt update && sudo apt install cri-o cri-o-runc
+sudo systemctl daemon-reload
+sudo systemctl start crio
+sudo systemctl status crio
+
+Add kubernetes apt repo
+-----------------------
+cat <<EOF | sudo tee /etc/apt/sources.list.d/kubernetes.conf
+deb http://apt.kubernetes.io/ kubernetes-xenial main
+EOF
+
+sudo curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -
+
+sudo apt update && sudo apt install -y kubelet kubeadm kubectl
+
+Add kubelet configuration
+-------------------------
+cat <<EOF | sudo tee /var/lib/kubelet/config.yaml
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+EOF
+
+You will probably need to add only the following line again (kubeadm init will wipe it out)
+cgroupDriver: systemd
+
+Install and configure dnsmasq
+-----------------------------
+There is a limitation in glibc/resolv to only support 3 nameservers. Kubernetes needs ~5 nameservers. The workaround is to use dnsmasq.
+https://unix.stackexchange.com/a/28608
+
+sudo apt update && sudo apt install dnsmasq
+sudo cp /etc/resolv.conf /etc/resolv.dnsmasq
+
+In /etc/dhcp/dhclient.conf, add:
+supersede domain-name-servers 127.0.0.1;
+
+In /etc/dnsmasq.conf, set:
+resolv-file=/etc/resolv.dnsmasq
+
+sudo systemctl daemon-reload
+sudo systemctl enable dnsmasq
+sudo systemctl start dnsmasq
+
+Start kubelet service
+---------------------
+sudo systemctl enable kubelet
+sudo systemctl start kubelet
+
+Configure NetworkManager
+------------------------
+cat <<EOF | sudo tee /etc/NetworkManager/conf.d/calico.conf
+[keyfile]
+unmanaged-devices=interface-name:cali*;interface-name:tunl*;interface-name:vxlan.calico
+EOF
+
+Configure IP pools
+------------------
+https://docs.projectcalico.org/getting-started/kubernetes/hardway/configure-ip-pools
+
+kubectl apply -f https://docs.projectcalico.org/manifests/crds.yaml
+export DATASTORE_TYPE=kubernetes
+calicoctl get nodes
+
+NAME     
+<localhost>   
+
+calicoctl get ippools
+
+NAME    CIDR             SELECTOR   
+
+cat > pool1.yaml <<EOF
+
+apiVersion: projectcalico.org/v3
+kind: IPPool
+metadata:
+  name: pool1
+spec:
+  cidr: 10.85.0.0/18
+  ipipMode: Never
+  natOutgoing: true
+  disabled: false
+  nodeSelector: all()
+EOF
+
+cat > pool2,yaml <<EOF
+
+apiVersion: projectcalico.org/v3
+kind: IPPool
+metadata:
+  name: pool2
+spec:
+  cidr: 10.85.192.0/19
+  ipipMode: Never
+  natOutgoing: true
+  disabled: true
+  nodeSelector: all()
+EOF
+
+calicoctl create -f pool1.yaml
+calicoctl create -f pool2.yaml
+
+calicoctl get ippools
+
+NAME    CIDR             SELECTOR   
+pool1   10.85.0.0/18     all()      
+pool2   10.85.192.0/19   all()      
+
+
+Install the CNI plugin
+---------------------
+https://docs.projectcalico.org/getting-started/kubernetes/hardway/install-cni-plugin
+
+generate key
+openssl req -newkey rsa:4096 \
+           -keyout cni.key \
+           -nodes \
+           -out cni.csr \
+           -subj "/CN=calico-cni"
+
+APISERVER=$(kubectl config view -o jsonpath='{.clusters[0].cluster.server}')
+kubectl config set-cluster kubernetes \
+    --certificate-authority=/etc/kubernetes/pki/ca.crt \
+    --embed-certs=true \
+    --server=$APISERVER \
+    --kubeconfig=cni.kubeconfig
+
+kubectl config set-credentials calico-cni \
+    --client-certificate=cni.crt \
+    --client-key=cni.key \
+    --embed-certs=true \
+    --kubeconfig=cni.kubeconfig
+
+kubectl config set-context default \
+    --cluster=kubernetes \
+    --user=calico-cni \
+    --kubeconfig=cni.kubeconfig
+
+kubectl config use-context default --kubeconfig=cni.kubeconfig
+
+Provision RBAC (Roles Based Access Control)
+-------------------------------------------
+kubectl apply -f - <<EOF
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: calico-cni
+rules:
+  # The CNI plugin needs to get pods, nodes, and namespaces.
+  - apiGroups: [""]
+    resources:
+      - pods
+      - nodes
+      - namespaces
+    verbs:
+      - get
+  # The CNI plugin patches pods/status.
+  - apiGroups: [""]
+    resources:
+      - pods/status
+    verbs:
+      - patch
+ # These permissions are required for Calico CNI to perform IPAM allocations.
+  - apiGroups: ["crd.projectcalico.org"]
+    resources:
+      - blockaffinities
+      - ipamblocks
+      - ipamhandles
+    verbs:
+      - get
+      - list
+      - create
+      - update
+      - delete
+  - apiGroups: ["crd.projectcalico.org"]
+    resources:
+      - ipamconfigs
+      - clusterinformations
+      - ippools
+    verbs:
+      - get
+      - list
+EOF
+
+kubectl create clusterrolebinding calico-cni --clusterrole=calico-cni --user=calico-cni
+
+sudo su -
+curl -L -o /opt/cni/bin/calico https://github.com/projectcalico/cni-plugin/releases/download/v3.14.0/calico-amd64
+chmod 755 /opt/cni/bin/calico
+curl -L -o /opt/cni/bin/calico-ipam https://github.com/projectcalico/cni-plugin/releases/download/v3.14.0/calico-ipam-amd64
+chmod 755 /opt/cni/bin/calico-ipam
+
+mkdir -p /etc/cni/net.d/
+
+cp cni.kubeconfig /etc/cni/net.d/calico-kubeconfig
+chmod 600 /etc/cni/net.d/calico-kubeconfig
+
+Write the CNI configuration:
+
+cat > /etc/cni/net.d/10-calico.conflist <<EOF
+{
+  "name": "k8s-pod-network",
+  "cniVersion": "0.3.1",
+  "plugins": [
+    {
+      "type": "calico",
+      "log_level": "info",
+      "datastore_type": "kubernetes",
+      "mtu": 1500,
+      "ipam": {
+          "type": "calico-ipam"
+      },
+      "policy": {
+          "type": "k8s"
+      },
+      "kubernetes": {
+          "kubeconfig": "/etc/cni/net.d/calico-kubeconfig"
+      }
+    },
+    {
+      "type": "portmap",
+      "snat": true,
+      "capabilities": {"portMappings": true}
+    }
+  ]
+}
+EOF
+
+Exit from root
+exit
+
+Check nodes
+kubectl get nodes
+
+NAME     STATUS   ROLES    AGE     VERSION
+<localhost>   Ready    <none>   4h49m   v1.19.3
+
+Initialize the cluster (for calico)
+-----------------------------------
+https://docs.projectcalico.org/getting-started/kubernetes/hardway/standing-up-kubernetes
+sudo kubeadm init --pod-network-cidr=10.85.0.0/16
+
+The first time this failed, but correcting the cgroup driver 'fixed' it.
+It fails in 'kubeadm init phase control-plane'.
+
+In /var/lib/kubelet/config.yaml:
+cgroupDriver: systemd
+
+sudo systemctl restart kubelet
+
+It is very handy for the rest of these steps to be watching k9s.
+
+Now you should be able to complete the rest of kubeadm init phases:
+
+sudo kubeadm init phase upload-config all
+sudo kubeadm init phase upload-certs
+(this doesn't seem to have any effect)
+sudo kubeadm init phase mark-control-plane
+sudo kubeadm init phase bootstrap-token
+(make note of the token)
+Using token: a7ktoa.fbq4pz1nluz5h0km
+kubeadm init phase kubelet-finalize-all
+sudo kubeadm init phase addon all
+(this throws an error because coredns is crashing)
+(need CNI ? or flannel or calico)
+https://coredns.io/plugins/loop/#troubleshooting
+Add the following to /var/lib/kubelet/config.yaml:
+resolvConf: /etc/resolv.dnsmasq
+
+sudo systemctl restart kubelet
+
+coredns still CrashLoopBackOff
+
+This gives a hint to look at the ConfigMap for coredns:
+https://stackoverflow.com/questions/62519210/coredns-service-corefile-location
+
+This article explains how to terminate and restart the containers:
+https://medium.com/faun/how-to-restart-kubernetes-pod-7c702ca984c1
+
+***
+NOTE: this doesn't fix the problem
+
+First, edit the ConfigMap to use /etc/resolve.dnsmasq
+kubectl edit ConfigMap coredns -n kube-system -o yaml
+kubectl get ConfigMap coredns -n kube-system -o yaml
+
+For sanity, let's check the pods
+kubectl get pods -n kube-system
+kubectl describe pod coredns -n kube-system
+
+Scale the coredns deployment to 0 replicas (Terminate them)
+kubectl scale deployment coredns --replicas=0 -n kube-system
+
+Once they are gone (k9s helps for observation)
+kubectl scale deployment coredns --replicas=2 -n kube-system
+
+Verify your ConfigMap edit lasted
+kubectl edit ConfigMap coredns -n kube-system -o yaml
+***
+
+
+Set KUBECONFIG for normal user
+------------------------------
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+You probably want to add to your .profile
+export KUBECONFIG=$HOME/.kube/config
+
+You should be able to check on the status of the cluster:
+kubectl get pods
+No resources found in default namespace.
+
+This is normal at this point, but it should not throw any errors.
+
+Install tekton CLI
+------------------
+sudo apt update;sudo apt install -y gnupg
+sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 3EFE0E0A2F2F60AA
+echo "deb http://ppa.launchpad.net/tektoncd/cli/ubuntu eoan main"|sudo tee /etc/apt/sources.list.d/tektoncd-ubuntu-cli.list
+sudo apt update && sudo apt install -y tektoncd-cli
+
+Install Helm
+------------
+curl https://baltocdn.com/helm/signing.asc | sudo apt-key add -
+sudo apt-get install apt-transport-https --yes
+echo "deb https://baltocdn.com/helm/stable/debian/ all main" | sudo tee /etc/apt/sources.list.d/helm-stable-debian.list
+sudo apt-get update
+sudo apt-get install helm
+
+Install k9s
+-----------
+Replace v0.23.8 with the latest (or desired) version:
+wget https://github.com/derailed/k9s/releases/download/v0.23.8/k9s_Linux_x86_64.tar.gz
+tar xvzf k9s_Linux_x86_64.tar.gz
+sudo cp k9s /usr/local/bin
+sudo chmod +x /usr/local/bin/k9s
+
+Install calicoctl
+-----------------
+https://docs.projectcalico.org/getting-started/clis/calicoctl/install
+cd /usr/local/bin
+sudo curl -O -L  https://github.com/projectcalico/calicoctl/releases/download/v3.16.5/calicoctl
+sudo chmod +x calicoctl
