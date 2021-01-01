@@ -1,0 +1,543 @@
+# Kubevirt and CDI (Containerized Data Importer) #
+
+In any new session, always remember:
+$ export KUBECONFIG=~/.kube/config
+
+https://kubevirt.io/user-guide/#/installation/installation
+$ kubectl create namespace kubevirt
+
+# if your hardware does not support kvm/virtualization
+$ kubectl create configmap -n kubevirt kubevirt-config \
+    --from-literal debug.useEmulation=true
+
+## Installing KubeVirt on Kubernetes ##
+KubeVirt can be installed using the KubeVirt operator, which manages the lifecycle of all the KubeVirt core components. Below is an example of how to install KubeVirt using an official release.
+
+# Pick an upstream version of KubeVirt to install
+$ export KUBEVIRT_VERSION=v0.36.0
+# Deploy the KubeVirt operator
+$ kubectl apply -f https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml
+# Create the KubeVirt CR (instance deployment request)
+$ kubectl apply -f https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml
+# wait until all KubeVirt components is up
+$ kubectl -n kubevirt wait kv kubevirt --for condition=Available
+(or just use k9s __recommended__)
+
+** Install virtctl **
+https://github.com/kubernetes-sigs/krew/#installation
+https://krew.sigs.k8s.io/docs/user-guide/setup/install/
+(
+  set -x; cd "$(mktemp -d)" &&
+  curl -fsSLO "https://github.com/kubernetes-sigs/krew/releases/latest/download/krew.tar.gz" &&
+  tar zxvf krew.tar.gz &&
+  KREW=./krew-"$(uname | tr '[:upper:]' '[:lower:]')_$(uname -m | sed -e 's/x86_64/amd64/' -e 's/arm.*$/arm/')" &&
+  "$KREW" install krew
+)
+
+$ export PATH="${KREW_ROOT:-$HOME/.krew}/bin:$PATH"
+
+$ kubectl krew install virt
+
+From now on, interpret any commands like "./virtctl image-upload ..." as
+$ kubectl virt image-upload ...
+or better yet, set an alias
+
+cat <<EOF >> $HOME/.profile
+export PATH="${KREW_ROOT:-$HOME/.krew}/bin:$PATH"
+alias virtctl="kubectl virt"
+EOF
+
+** Create a simple VMI **
+https://kubevirt.io/user-guide/#/creation/creating-virtual-machines?id=virtualmachineinstance-api
+
+cat <<EOF >> kubevirt-fedora-vmi.yaml
+apiVersion: kubevirt.io/v1alpha3
+kind: VirtualMachineInstance
+metadata:
+  name: testvmi-nocloud
+spec:
+  terminationGracePeriodSeconds: 30
+  domain:
+    resources:
+      requests:
+        memory: 1024M
+    devices:
+      disks:
+      - name: containerdisk
+        disk:
+          bus: virtio
+      - name: emptydisk
+        disk:
+          bus: virtio
+      - disk:
+          bus: virtio
+        name: cloudinitdisk
+  volumes:
+  - name: containerdisk
+    containerDisk:
+      image: kubevirt/fedora-cloud-container-disk-demo:latest
+  - name: emptydisk
+    emptyDisk:
+      capacity: "2Gi"
+  - name: cloudinitdisk
+    cloudInitNoCloud:
+      userData: |-
+        #cloud-config
+        password: fedora
+        chpasswd: { expire: False }
+EOF
+
+$ kubectl apply -f kubevirt-fedora-vmi.yaml
+
+** Test the simple VMI **
+
+$ kubectl get virtualmachineinstances
+NAME              AGE     PHASE     IP           NODENAME
+testvmi-nocloud   5m56s   Running   10.44.0.10   <worker>
+
+$ virtctl console testvmi-nocloud
+Successfully connected to testvmi-nocloud console. The escape sequence is ^]
+
+testvmi-nocloud login: fedora
+Password: 
+[fedora@testvmi-nocloud ~]$ uname -a
+Linux testvmi-nocloud 5.6.6-300.fc32.x86_64 #1 SMP Tue Apr 21 13:44:19 UTC 2020 x86_64 x86_64 x86_64 GNU/Linux
+
+** Install CDI (Containerized Data Importer) **
+Setup storage
+$ wget https://raw.githubusercontent.com/kubevirt/kubevirt.github.io/master/labs/manifests/storage-setup.yml
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hostpath-provisioner
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      k8s-app: hostpath-provisioner
+  template:
+    metadata:
+      labels:
+        k8s-app: hostpath-provisioner
+    spec:
+      containers:
+        - name: hostpath-provisioner
+          image: mazdermind/hostpath-provisioner:latest
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: PV_DIR
+              value: /var/lib/minikube
+          volumeMounts:
+            - name: pv-volume
+              mountPath: /var/lib/minikube
+      volumes:
+        - name: pv-volume
+          hostPath:
+            path: /var/lib/minikube
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: hostpath-provisioner
+rules:
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "update"]
+
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list", "watch", "create", "update", "patch"]
+
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: hostpath-provisioner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: hostpath-provisioner
+subjects:
+- kind: ServiceAccount
+  name: default
+  namespace: kube-system
+---
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: hostpath
+  annotations:
+    storageclass.kubernetes.io/is-default-class: "true"
+provisioner: hostpath
+
+Edit paths and then apply
+In the rest of this README, the path was /tekton/images instead of /var/lib/minikube
+$ kubectl apply -f storage-setup.yml
+
+## Deploy CDI ##
+https://github.com/kubevirt/containerized-data-importer#deploy-it
+
+{
+ export CDI_VERSION=$(curl -s https://api.github.com/repos/kubevirt/containerized-data-importer/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')
+ kubectl create -f https://github.com/kubevirt/containerized-data-importer/releases/download/$CDI_VERSION/cdi-operator.yaml
+ kubectl create -f https://github.com/kubevirt/containerized-data-importer/releases/download/$CDI_VERSION/cdi-cr.yaml
+}
+
+## Example DataVolume ##
+https://github.com/kubevirt/containerized-data-importer/blob/master/doc/datavolumes.md#blank-data-volume
+
+cat <<EOF >> cdi-blank-dv.yaml
+---
+apiVersion: cdi.kubevirt.io/v1beta1
+kind: DataVolume
+metadata:
+  name: example-blank-dv
+spec:
+  source:
+    blank: {}
+  pvc:
+    accessModes:
+      - ReadWriteOnce
+    resources:
+      requests:
+        storage: 1Gi
+EOF
+
+$ kubectl create -f cdi-blank-dv.yaml 
+
+If your cluster has DNS issues you might see an error like the following (no known workaround yet):
+Error from server (InternalError): error when creating "cdi-blank-dv.yaml": Internal error occurred: failed calling webhook "datavolume-mutate.cdi.kubevirt.io": Post "https://cdi-api.cdi.svc:443/datavolume-mutate?timeout=30s": dial tcp 10.98.219.43:443: connect: no route to host
+
+If you create an importer-fedora and it stays in Pending state because PVC cannot be satisfied... delete the pvc
+$ kubectl get pvc
+$ kubectl delete pvc fedora
+and then you will be able to delete the pod (if it doesn't go away on its own)
+you may also need to delete the deployment
+$ kubectl delete deployment hostpath-provisioner -n kube-system
+
+# Another example of working with storage classes #
+# Create local storage #
+https://vocon-it.com/2018/12/20/kubernetes-local-persistent-volumes/
+
+cat > storageClass.yaml << EOF
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: my-local-storage
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+EOF
+
+kubectl create -f storageClass.yaml
+
+## Create persistent volume using the storage class ##
+cat > persistentVolume.yaml << EOF
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: my-local-pv
+spec:
+  capacity:
+    storage: 500Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: my-local-storage
+  local:
+    path: /tekton/images/vol1
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - node1
+EOF
+
+Change the <node name> ('node1' in the above example) to the name of your node which is running libvirt/kubevirt
+
+$ kubectl apply -f persistentVolumeClaim.yaml
+
+# on the node, where the POD will be located (node1 in our case):
+DIRNAME="vol1"
+mkdir -p /mnt/disk/$DIRNAME 
+# only needed if you are running selinux enforcing ?
+# chcon -Rt svirt_sandbox_file_t /mnt/disk/$DIRNAME
+chmod 777 /mnt/disk/$DIRNAME
+
+# on master (or make sure you used nodeAffinity):
+$ kubectl create -f persistentVolume.yaml
+
+$ cat > persistentVolumeClaim.yaml << EOF
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: my-claim
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: my-local-storage
+  resources:
+    requests:
+      storage: 500Gi
+EOF
+
+$ kubectl create -f persistentVolumeClaim.yaml
+
+## Use the PVC with a pod ##
+
+cat > http-pod.yaml << EOF
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: www
+  labels:
+    name: www
+spec:
+  containers:
+  - name: www
+    image: nginx:alpine
+    ports:
+      - containerPort: 80
+        name: www
+    volumeMounts:
+      - name: www-persistent-storage
+        mountPath: /usr/share/nginx/html
+  volumes:
+    - name: www-persistent-storage
+      persistentVolumeClaim:
+        claimName: my-claim
+EOF
+
+$ kubectl apply -f http-pod.yaml
+
+Add an index.html file:
+$ echo "Hello local persistent volume" > /mnt/disk/vol1/index.html
+
+POD_IP=$(kubectl get pod www -o yaml | grep podIP | grep -E -o "(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)")
+curl $POD_IP
+
+
+# Back to CDI usage #
+We want to be able to use
+$ virctl image-upload ...
+
+You need two persistentVolumes, one for each persistentVolumeClaim
+cirros-dv
+cirros-dv-scratch
+
+cat <<EOF >> cirros-vmi.yaml
+apiVersion: kubevirt.io/v1alpha3
+kind: VirtualMachineInstance
+metadata:
+  name: cirros-vm
+spec:
+  domain:
+    devices:
+      disks:
+      - disk:
+          bus: virtio
+        name: pvcdisk
+    machine:
+      type: ""
+    resources:
+      requests:
+        memory: 64M
+  terminationGracePeriodSeconds: 0
+  volumes:
+  - name: pvcdisk
+    persistentVolumeClaim:
+      claimName: example-upload-dv
+status: {}
+EOF
+
+$ kubectl apply -f cirros-vmi.yaml
+
+$ kubectl get vmi
+NAME              AGE    PHASE     IP           NODENAME
+cirros-vm         1m   Running     10.44.0.17   node1
+
+$ kubectl get pods
+NAME                                  READY   STATUS    RESTARTS   AGE
+virt-launcher-cirros-vm-abcde         1/1     Running   0          6m
+
+$ kubectl exec -t virt-launcher-cirros-vm-abcde -- uname -a
+Linux cirros-vm 4.19.0-13-amd64 #1 SMP Debian 4.19.160-2 (2020-11-28) x86_64 x86_64 x86_64 GNU/Linux
+
+### WIP ###
+## Consuming a Yocto Project built qemu image ##
+
+NOTE: the following assumes you used the storage class above (hostpath)
+
+$ kubectl get storageclass
+NAME                 PROVISIONER                    RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+hostpath (default)   hostpath                       Delete          Immediate              false                  8h
+
+### Create a path to download (or copy) our images and create our persistent volumes
+$ mkdir /tekton/images/
+
+### Download (or copy) a Yocto Project built image
+$ cd /tekton/images/
+$ wget http://downloads.yoctoproject.org/releases/yocto/yocto-3.2.1/machines/qemu/qemux86-64/core-image-minimal-dev-qemux86-64.wic
+
+# Prepare paths for the two PersistentVolumes we are going to need
+The virtctl image-upload command needs a PersistentVolumeClaim for the disk image and another for the scratch. Each of these PVCs will need a PV.
+
+The first pv is going to be where the actual PersistentVolumeClaim which will be the bootable VM image when we are done.
+$ mkdir /tekton/images/dunfell-hostpath-pv
+$ chmod 777 /tekton/images/dunfell-hostpath-pv
+
+The second pv is used by CDI to prepare the image (sadly, with hostpath storage or local-storage this is always required)
+Cloud storage providers are able to dynamically create pv/pvc, but that doesn't work with hostpath or local-storage.
+
+$ mkdir /tekton/images/dunfell-hostpath-scratch-pv
+$ chmod 777 /tekton/images/dunfell-hostpath-scratch-pv
+
+# Create the PersistentVolumes
+cat <<EOF >> 00_dunfell-hostpath-pv.yaml
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: dunfell-hostpath-pv
+  namespace: default
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: hostpath
+  local:
+    path: /tekton/images/dunfell-hostpath-pv
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - node1
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: dunfell-hostpath-scratch-pv
+  namespace: default
+spec:
+  capacity:
+    storage: 5Gi
+  accessModes:
+  - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: hostpath
+  local:
+    path: /tekton/images/dunfell-hostpath-scratch-pv
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - node1
+EOF
+
+$ kubectl apply -f 00_dunfell-hostpath-pv.yaml
+$ kubectl get pv
+NAME                          CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS      CLAIM                               STORAGECLASS       REASON   AGE
+dunfell-hostpath-pv           5Gi        RWO            Retain           Available                                       hostpath                    7s
+dunfell-hostpath-scratch-pv   5Gi        RWO            Retain           Available                                       hostpath                    7s
+
+## "Upload" the qemu image to the cdi-importer ##
+The cdi-importer will use a container to create a bootable disk image, although it is limited to the image types it can handle (raw, qcow2)
+
+$ virtctl image-upload --pvc-name=dunfell-vm-disk --pvc-size=5Gi --image-path=/tekton/images/core-image-minimal-dev-qemux86-64.wic
+PersistentVolumeClaim default/dunfell-vm-disk created
+Waiting for PVC dunfell-vm-disk upload pod to be ready...
+Pod now ready
+uploadproxy URL not found
+
+$ kubectl get pods
+NAME                                  READY   STATUS    RESTARTS   AGE
+cdi-upload-dunfell-vm-disk            1/1     Running   0          7m7s
+
+$ kubectl get pv
+NAME                          CAPACITY   ACCESS MODES   RECLAIM POLICY   STATUS      CLAIM                               STORAGECLASS       REASON   AGE
+dunfell-hostpath-pv           5Gi        RWO            Retain           Bound       default/dunfell-vm-disk             hostpath                    3m17s
+dunfell-hostpath-scratch-pv   5Gi        RWO            Retain           Bound       default/dunfell-vm-disk-scratch     hostpath                    3m17s
+
+$ kubectl get pvc
+NAME                        STATUS   VOLUME                        CAPACITY   ACCESS MODES   STORAGECLASS   AGE
+dunfell-vm-disk             Bound    dunfell-hostpath-pv           5Gi        RWO            hostpath       107s
+dunfell-vm-disk-scratch     Bound    dunfell-hostpath-scratch-pv   5Gi        RWO            hostpath       106s
+
+Check the result
+$ ls /tekton/images/dunfell-hostpath-pv
+Huh? it should have had disk.img created! Something not working right with qemu.wic image?
+FIXME: what is needed to make a Yocto Project built image work with CDI?
+
+TODO:
+# Create the VirtualMachineInstance
+Here we are using the pvc that was created by the virtctl image-upload command
+
+cat <<EOF >> 90_dunfell-qemu-vmi.yaml
+---
+apiVersion: kubevirt.io/v1alpha3
+kind: VirtualMachineInstance
+metadata:
+  name: dunfell-vm
+spec:
+  domain:
+    devices:
+      disks:
+      - disk:
+          bus: virtio
+        name: pvcdisk
+    machine:
+      type: ""
+    resources:
+      requests:
+        memory: 512M
+  terminationGracePeriodSeconds: 0
+  volumes:
+  - name: pvcdisk
+    persistentVolumeClaim:
+      claimName: dunfell-qemu-pv
+status: {}
+EOF
+
+# Test the virtual machine console
+$ virctl console dunfell-vm
+
+** How to upgrade kubernetes **
+After the usual $ sudo apt update && sudo apt upgrade -y
+
+$ sudo kubeadm upgrade plan
+$ sudo kubeadm upgrade apply v1.20.1
+
+** References **
+https://www.youtube.com/watch?t=595&v=ULDG6udoVts&feature=youtu.be
+https://github.com/kubevirt/kubevirt-tekton-tasks/blob/main/tasks/create-vm/manifests/create-vm-from-template.yaml
+https://github.com/kubevirt/containerized-data-importer/blob/master/doc/upload.md#expose-cdi-uploadproxy-service
+https://github.com/kubevirt/containerized-data-importer/blob/master/doc/supported_operations.md
+https://github.com/kubevirt/containerized-data-importer/blob/master/doc/scratch-space.md
